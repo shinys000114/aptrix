@@ -698,3 +698,66 @@ func TestGCKeepsSnapshots(t *testing.T) {
 	h.ok("gc", "--yes")
 	h.fail("no snapshot labelled", "rollback", "b", label, "--yes")
 }
+
+func TestRetireAndMerge(t *testing.T) {
+	h := start(t)
+	merged := `
+[publish.new]
+storage = "filesystem:test"
+prefix = "new"
+dists = ["jammy", "noble"]
+components = ["main"]
+architectures = ["arm64"]
+`
+	old := `
+[publish.old]
+storage = "filesystem:test"
+prefix = "old"
+repo_name = "old-{dist}"
+dists = ["jammy", "noble"]
+components = ["old"]
+architectures = ["arm64"]
+`
+	h.config(old + merged)
+	h.ok("sync", "--yes")
+	h.ok("add", "old", "old", "--dist", "all", h.deb("tool", "1.0", "all", "a"), h.deb("tool", "1.1", "all", "a"))
+
+	// merge: copy everything, then move what is left
+	h.ok("promote", "old/old", "new/main", "*", "--all-versions", "--yes")
+	if n := strings.Count(h.packagesOf("new", "noble", "main"), "Package: tool"); n != 2 {
+		t.Fatalf("new noble has %d tool versions", n)
+	}
+	h.ok("rm", "old", "old", "*", "--yes", "--no-snapshot")
+	h.ok("snapshot", "prune", "old", "--older-than", "0s", "--include-manual", "--yes")
+
+	// retire the old publish
+	h.config(strings.Replace(old, "repo_name", "retire = true\nrepo_name", 1) + merged)
+	out := h.ok("plan")
+	mustContain(t, out, "publish.old is retired")
+	mustContain(t, out, "No changes.")
+	h.fail("is retired", "add", "old", "old", "--dist", "noble", h.deb("x", "1.0", "all", "a"))
+	h.fail("is retired", "promote", "new/main", "old/old", "tool", "--yes")
+	mustContain(t, h.ok("status", "old"), "(retired")
+	out = h.ok("plan", "--prune")
+	mustContain(t, out, "- publish  filesystem:test:old jammy")
+	mustContain(t, out, "- repo     old-noble (0 packages)")
+	if strings.Contains(out, "new") {
+		t.Fatalf("retiring old must not touch new:\n%s", out)
+	}
+	h.ok("sync", "--prune", "--yes")
+	if h.read("old/dists/noble/Release") != "" {
+		t.Fatal("old still published")
+	}
+	mustContain(t, h.packagesOf("new", "noble", "main"), "Package: tool")
+
+	// finally drop the table: nothing left to do
+	h.config(merged)
+	mustContain(t, h.ok("plan", "--prune"), "No changes.")
+	c, _ := aptly.New(h.url, aptly.Options{})
+	repos, _ := c.Repos(context.Background())
+	for _, r := range repos {
+		if strings.HasPrefix(r.Name, "old-") {
+			t.Fatalf("leftover repo %s", r.Name)
+		}
+	}
+}

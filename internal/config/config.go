@@ -74,6 +74,12 @@ type Publish struct {
 	// SnapshotMaxAge, e.g. "30d", drops aptrix's automatic snapshots
 	// (pre-*) of this publish that are older than this, after each change.
 	SnapshotMaxAge string `toml:"snapshot_max_age"`
+
+	// Retire marks the publish for removal: `sync --prune` drops all its
+	// published dists and its (empty) repos, and add/promote into it are
+	// refused. Dists/components may stay listed so ls, rm and snapshot
+	// commands still find its repos while it is being emptied.
+	Retire bool `toml:"retire"`
 }
 
 // ParseAge parses durations like "30d", "12h", "90m" (Go syntax plus "d").
@@ -227,13 +233,13 @@ func (c *Config) validate() error {
 		if !strings.Contains(p.RepoName, "{component}") && len(p.Components) > 1 {
 			errs = append(errs, fmt.Errorf("%s: repo_name must contain {component} when there is more than one component", where))
 		}
-		if len(p.Dists) == 0 {
+		if len(p.Dists) == 0 && !p.Retire {
 			errs = append(errs, fmt.Errorf("%s: dists is empty", where))
 		}
-		if len(p.Components) == 0 {
+		if len(p.Components) == 0 && !p.Retire {
 			errs = append(errs, fmt.Errorf("%s: components is empty", where))
 		}
-		if len(p.Architectures) == 0 {
+		if len(p.Architectures) == 0 && !p.Retire {
 			errs = append(errs, fmt.Errorf("%s: architectures is empty (aptly cannot infer them for empty repos)", where))
 		}
 		for _, list := range [][]string{p.Dists, p.Components, p.Architectures} {

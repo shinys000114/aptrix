@@ -165,7 +165,11 @@ func (e *env) cmdStatus(args []string) error {
 		if i > 0 {
 			fmt.Fprintln(e.stdout)
 		}
-		fmt.Fprintf(e.stdout, "%s  %s\n", p.Alias, p.Target())
+		retired := ""
+		if p.Retire {
+			retired = "  (retired: 'sync --prune' removes it)"
+		}
+		fmt.Fprintf(e.stdout, "%s  %s%s\n", p.Alias, p.Target(), retired)
 		tw := tabwriter.NewWriter(e.stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
 		fmt.Fprint(tw, "component\t"+strings.Join(p.Dists, "\t")+"\t\n")
 		for _, comp := range p.Components {

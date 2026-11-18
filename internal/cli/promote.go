@@ -57,6 +57,9 @@ func (e *env) cmdPromote(args []string) error {
 	if err != nil {
 		return err
 	}
+	if dst.Retire {
+		return fmt.Errorf("publish.%s is retired; it cannot receive packages", dst.Alias)
+	}
 	type spec struct{ pat, ver string }
 	var sp []spec
 	exactVersion := false

@@ -139,3 +139,16 @@ func TestParseAge(t *testing.T) {
 		}
 	}
 }
+
+func TestRetireAllowsEmptyLayout(t *testing.T) {
+	data := strings.Replace(good, "[publish.tool]\nprefix = \"tool\"", "[publish.tool]\nprefix = \"tool\"\nretire = true", 1)
+	data = strings.Replace(data, `dists = ["noble"]`, `dists = []`, 1)
+	data = strings.Replace(data, `components = ["tool"]`, `components = []`, 1)
+	c, err := Parse([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Publish["tool"].Retire || len(c.Publish["tool"].Cells()) != 0 {
+		t.Fatal("retired publish with empty layout")
+	}
+}

@@ -84,6 +84,20 @@ Optional per publish:
   Freed packages stay in aptly's pool until `aptrix gc` (aptly
   `db cleanup`, server-wide).
 
+### Retiring a publish
+
+`sync --prune` only manages publishes listed in the config, so removing a
+table does not remove the publish. To remove one (e.g. after merging it into
+another with `promote`):
+
+1. Empty it: `aptrix rm <alias> <component> '*'` (or `promote --move` out).
+2. Drop its snapshots while it is still in the config:
+   `aptrix snapshot prune <alias> --older-than 0s --include-manual`.
+3. Add `retire = true` to its table. `add`/`promote` into it are refused, and
+   `plan --prune` lists its published dists and repos for removal (non-empty
+   ones need `--force`; repos another publish uses are kept).
+4. `aptrix sync --prune`, then delete the table and run `aptrix gc`.
+
 ### One config for many hosts
 
 `-c` and `APTRIX_CONFIG` also accept an `http(s)://` URL. Serve one

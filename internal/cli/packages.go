@@ -175,6 +175,9 @@ func (e *env) cmdAdd(args []string) error {
 		return err
 	}
 	p := pubs[0]
+	if p.Retire {
+		return fmt.Errorf("publish.%s is retired; add packages to its replacement instead", alias)
+	}
 	if !slices.Contains(p.Components, comp) {
 		return fmt.Errorf("component %q is not in publish.%s (components: %s)", comp, alias, strings.Join(p.Components, ", "))
 	}

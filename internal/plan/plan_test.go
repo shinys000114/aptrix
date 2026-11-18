@@ -178,3 +178,55 @@ func TestPruneKeepsNonEmptyDist(t *testing.T) {
 		t.Fatalf("got\n%s", got)
 	}
 }
+
+func TestRetire(t *testing.T) {
+	cur := state(published("jammy", "main"), published("noble", "main"))
+	cur.Repos["b-focal-main"] = aptly.Repo{Name: "b-focal-main"} // leftover, never published
+	foreign := aptly.Published{Storage: "filesystem:public", Prefix: "other", Distribution: "noble", SourceKind: "local",
+		Sources: []aptly.Source{{Component: "main", Name: "b-noble-main"}}}
+	cur.Publishes = append(cur.Publishes, foreign)
+	c, err := config.Parse([]byte(`
+[aptly]
+url = "http://127.0.0.1:1"
+[signing]
+skip = true
+[publish.b]
+storage = "filesystem:public"
+prefix = "b"
+retire = true
+dists = ["focal", "jammy", "noble"]
+components = ["main"]
+architectures = ["arm64"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.Publish["b"]
+
+	pl := Make([]*config.Publish{p}, cur, Options{})
+	if len(pl.Steps) != 0 || len(pl.Warnings) != 2 || !strings.Contains(pl.Warnings[0], "retired") {
+		t.Fatalf("without prune: steps=%q warnings=%v", lines(pl), pl.Warnings)
+	}
+
+	pl = Make([]*config.Publish{p}, cur, Options{Prune: true})
+	want := `- publish filesystem:public:b jammy
+- publish filesystem:public:b noble
+- repo b-focal-main (0 packages)
+- repo b-jammy-main (0 packages)`
+	if got := lines(pl); got != want {
+		t.Fatalf("prune got\n%s\nwant\n%s", got, want)
+	}
+	if !strings.Contains(strings.Join(pl.Warnings, "\n"), "b-noble-main is also published by filesystem:public:other noble") {
+		t.Fatalf("foreign reference must keep the repo: %v", pl.Warnings)
+	}
+
+	cur.PackageCount["b-jammy-main"] = 2
+	pl = Make([]*config.Publish{p}, cur, Options{Prune: true})
+	if strings.Contains(lines(pl), "jammy") || len(pl.Blocked) != 1 {
+		t.Fatalf("non-empty dist must be blocked: %q %v", lines(pl), pl.Blocked)
+	}
+	pl = Make([]*config.Publish{p}, cur, Options{Prune: true, Force: true})
+	if !strings.Contains(lines(pl), "- repo b-jammy-main (2 packages)") {
+		t.Fatalf("force: %q", lines(pl))
+	}
+}

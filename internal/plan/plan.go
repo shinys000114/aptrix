@@ -85,6 +85,25 @@ func (s *State) managed(p *config.Publish) []aptly.Published {
 	return out
 }
 
+// foreignRef returns a publish outside p that uses repo as a source.
+func (s *State) foreignRef(p *config.Publish, repo string) string {
+	for _, cur := range s.Publishes {
+		if cur.Storage == p.Storage && normPrefix(cur.Prefix) == normPrefix(p.Prefix) {
+			continue
+		}
+		for _, src := range cur.Sources {
+			if src.Name == repo {
+				t := normPrefix(cur.Prefix)
+				if cur.Storage != "" {
+					t = cur.Storage + ":" + t
+				}
+				return t + " " + cur.Distribution
+			}
+		}
+	}
+	return ""
+}
+
 // Published returns the current publish of p for dist, if any.
 func (s *State) Published(p *config.Publish, dist string) (aptly.Published, bool) {
 	for _, cur := range s.managed(p) {
@@ -176,8 +195,17 @@ func Make(pubs []*config.Publish, s *State, o Options) *Plan {
 	pl := &Plan{}
 	var creates, publishes, drops, repoDrops []Step
 	for _, p := range pubs {
+		// A retired publish wants nothing; its layout (p.Cells) is still
+		// used to find leftover repos.
+		var layout []config.Cell
+		activeDists := p.Dists
+		if p.Retire {
+			activeDists = nil
+		} else {
+			layout = p.Cells()
+		}
 		desired := map[string]bool{}
-		for _, cell := range p.Cells() {
+		for _, cell := range layout {
 			desired[cell.Repo] = true
 			if r, ok := s.Repos[cell.Repo]; !ok {
 				creates = append(creates, Step{Kind: CreateRepo, Publish: p, Dist: cell.Dist, Component: cell.Component, Repo: cell.Repo})
@@ -193,7 +221,7 @@ func Make(pubs []*config.Publish, s *State, o Options) *Plan {
 		stillRef := map[string]int{}
 		nonEmpty := func(repo string) int { return s.PackageCount[repo] }
 
-		for _, dist := range p.Dists {
+		for _, dist := range activeDists {
 			cells := p.CellsFor(dist)
 			cur, ok := s.Published(p, dist)
 			if !ok {
@@ -264,11 +292,15 @@ func Make(pubs []*config.Publish, s *State, o Options) *Plan {
 		}
 
 		for _, cur := range s.managed(p) {
-			if slices.Contains(p.Dists, cur.Distribution) {
+			if slices.Contains(activeDists, cur.Distribution) {
 				continue
 			}
 			if !o.Prune {
-				pl.Warnings = append(pl.Warnings, fmt.Sprintf("%s %s is published but not in the config (use --prune to remove)", p.Target(), cur.Distribution))
+				if p.Retire {
+					pl.Warnings = append(pl.Warnings, fmt.Sprintf("publish.%s is retired; %s %s is still published (use --prune to remove)", p.Alias, p.Target(), cur.Distribution))
+				} else {
+					pl.Warnings = append(pl.Warnings, fmt.Sprintf("%s %s is published but not in the config (use --prune to remove)", p.Target(), cur.Distribution))
+				}
 				for _, src := range cur.Sources {
 					stillRef[src.Name]++
 				}
@@ -293,6 +325,14 @@ func Make(pubs []*config.Publish, s *State, o Options) *Plan {
 		}
 
 		if o.Prune {
+			if p.Retire {
+				// also leftover repos of the layout that no publish uses
+				for _, cell := range p.Cells() {
+					if _, exists := s.Repos[cell.Repo]; exists && stillRef[cell.Repo] == 0 {
+						unpublished[cell.Repo] = true
+					}
+				}
+			}
 			names := make([]string, 0, len(unpublished))
 			for n := range unpublished {
 				names = append(names, n)
@@ -300,6 +340,10 @@ func Make(pubs []*config.Publish, s *State, o Options) *Plan {
 			sort.Strings(names)
 			for _, name := range names {
 				if desired[name] || stillRef[name] > 0 {
+					continue
+				}
+				if other := s.foreignRef(p, name); other != "" {
+					pl.Warnings = append(pl.Warnings, fmt.Sprintf("repo %s is also published by %s; kept", name, other))
 					continue
 				}
 				if _, exists := s.Repos[name]; !exists {
