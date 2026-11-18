@@ -5,6 +5,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -299,12 +300,13 @@ func (e *env) cmdLs(args []string) error {
 }
 
 func (e *env) cmdRm(args []string) error {
-	fs := newFlags(e, "rm", "<alias> <component> <package>[=version] [--dist d1,d2|all] [--keep N] [--yes]")
+	fs := newFlags(e, "rm", "<alias> <component> <package|glob>[=version] [--dist d1,d2|all] [--keep N] [--yes]")
 	distFlag := fs.String("dist", "all", `dists to remove from (comma separated or "all")`)
 	keep := fs.Int("keep", -1, "keep the newest N versions per dist and architecture, remove the rest")
 	arch := fs.String("arch", "", "only this architecture")
 	yes := fs.Bool("yes", false, "do not ask for confirmation")
 	noPublish := fs.Bool("no-publish", false, "remove from the repos but do not republish")
+	noSnap := fs.Bool("no-snapshot", false, "do not snapshot the affected repos before removing")
 	pos, err := parse(fs, args)
 	if err != nil || len(pos) != 3 {
 		fs.Usage()
@@ -317,6 +319,10 @@ func (e *env) cmdRm(args []string) error {
 	}
 	if hasVersion && version == "" {
 		return fmt.Errorf("empty version in %q: %w", spec, ErrUsage)
+	}
+	// Shell-style globs ("*-dbg", "linux-image-*") match package names.
+	if _, err := path.Match(pkgName, ""); err != nil {
+		return fmt.Errorf("bad package pattern %q: %v: %w", pkgName, err, ErrUsage)
 	}
 	cfg, err := e.load()
 	if err != nil {
@@ -346,14 +352,14 @@ func (e *env) cmdRm(args []string) error {
 	var victims []pkgRow
 	seen := map[string]int{} // repo/arch -> versions kept so far (rows are newest first)
 	for _, r := range rows {
-		if r.Package.Package != pkgName || (*arch != "" && r.Architecture != *arch) {
+		if ok, _ := path.Match(pkgName, r.Package.Package); !ok || (*arch != "" && r.Architecture != *arch) {
 			continue
 		}
 		if hasVersion && r.Version != version {
 			continue
 		}
 		if *keep >= 0 {
-			k := r.Repo + "/" + r.Architecture
+			k := r.Repo + "/" + r.Package.Package + "/" + r.Architecture
 			if seen[k] < *keep {
 				seen[k]++
 				continue
@@ -381,6 +387,13 @@ func (e *env) cmdRm(args []string) error {
 		if !slices.Contains(touched, r.Dist) {
 			touched = append(touched, r.Dist)
 		}
+	}
+	if !*noSnap {
+		label := newLabel("pre-rm")
+		if err := e.takeSnapshots(c, sortedKeys(byRepo), label, "aptrix: before rm "+spec); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.stdout, "snapshot %s taken; undo with 'aptrix rollback %s %s'\n", label, alias, label)
 	}
 	for _, repo := range sortedKeys(byRepo) {
 		if err := c.DeletePackages(e.ctx, repo, byRepo[repo]); err != nil {

@@ -38,8 +38,12 @@ Commands:
   status [alias...]                         package count per dist x component (read-only)
   ls     <alias> [component] [--dist d,..]  list packages (read-only)
   add    <alias> <component> <file.deb>...  add packages and republish
-  rm     <alias> <component> <package>[=version] [--keep N]
-                                            remove packages and republish
+  rm     <alias> <component> <package|glob>[=version] [--keep N]
+                                            remove packages (snapshot first) and republish
+  snapshot create <alias> [component] [--label L]   snapshot repos under one label
+  snapshot list   <alias>                   list snapshot labels (read-only)
+  snapshot drop   <alias> <label>           delete the snapshots of a label
+  rollback <alias> <label> [component]      restore repos to a snapshot label and republish
   version                                   print version
 
 Run "aptrix <command> -h" for command flags.
@@ -111,6 +115,10 @@ func RunWith(ctx context.Context, args []string, s Streams) error {
 		return e.cmdAdd(rest)
 	case "rm", "remove":
 		return e.cmdRm(rest)
+	case "snapshot", "snapshots":
+		return e.cmdSnapshot(rest)
+	case "rollback":
+		return e.cmdRollback(rest)
 	case "version":
 		fmt.Fprintf(stdout, "aptrix %s", Version)
 		if Commit != "" {

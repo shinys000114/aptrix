@@ -408,3 +408,78 @@ architectures = ["arm64"]
 		t.Fatalf("root publish missing package: %v\n%s", err, b)
 	}
 }
+
+func labelFrom(t *testing.T, out, prefix string) string {
+	t.Helper()
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "snapshot "+prefix) {
+			return strings.Fields(l)[1]
+		}
+	}
+	t.Fatalf("no %s snapshot label in:\n%s", prefix, out)
+	return ""
+}
+
+func TestSnapshotRollback(t *testing.T) {
+	h := start(t)
+	h.config(`
+[publish.t]
+storage = "filesystem:test"
+prefix = "t"
+dists = ["noble"]
+components = ["main", "extra"]
+architectures = ["arm64"]
+`)
+	h.ok("sync", "--yes")
+	h.ok("add", "t", "main",
+		h.deb("hello", "1.0~noble", "arm64", "a"), h.deb("hello", "1.1~noble", "arm64", "a"),
+		h.deb("hello-dbg", "1.0~noble", "arm64", "a"), h.deb("hello-dbg", "1.1~noble", "arm64", "a"),
+		h.deb("tool", "1.0~noble", "arm64", "a"))
+	h.ok("add", "t", "extra", h.deb("x-dbg", "1.0~noble", "arm64", "a"))
+
+	// glob rm only touches the named component and snapshots it first
+	h.fail("--yes", "rm", "t", "main", "*-dbg")
+	out := h.ok("rm", "t", "main", "*-dbg", "--yes")
+	label := labelFrom(t, out, "pre-rm-")
+	mustContain(t, out, "removed 2 from t-noble-main")
+	pk := h.packages("noble", "main")
+	if strings.Contains(pk, "Package: hello-dbg") {
+		t.Fatalf("dbg still published:\n%s", pk)
+	}
+	mustContain(t, pk, "Package: tool")
+	mustContain(t, h.packages("noble", "extra"), "Package: x-dbg")
+	mustContain(t, h.ok("snapshot", "list", "t"), label)
+
+	// rollback restores exactly, and is itself undoable
+	h.fail("--yes", "rollback", "t", label)
+	out = h.ok("rollback", "t", label, "--yes")
+	mustContain(t, out, "restored t-noble-main (+2 -0)")
+	undo := labelFrom(t, out, "pre-rollback-")
+	mustContain(t, h.packages("noble", "main"), "Version: 1.1~noble\n")
+	if n := strings.Count(h.packages("noble", "main"), "Package: hello-dbg"); n != 2 {
+		t.Fatalf("hello-dbg versions after rollback = %d, want 2", n)
+	}
+	mustContain(t, h.ok("rollback", "t", label, "--yes"), "Already at "+label)
+	h.ok("rollback", "t", undo, "--yes", "--no-snapshot")
+	if strings.Contains(h.packages("noble", "main"), "Package: hello-dbg") {
+		t.Fatal("undoing the rollback should remove dbg again")
+	}
+
+	// --keep with a glob keeps N versions per package name
+	h.ok("rollback", "t", label, "--yes", "--no-snapshot")
+	h.ok("rm", "t", "main", "hello*", "--keep", "1", "--yes", "--no-snapshot")
+	pk = h.packages("noble", "main")
+	if strings.Count(pk, "Package: hello\n") != 1 || strings.Count(pk, "Package: hello-dbg\n") != 1 {
+		t.Fatalf("keep 1 per name failed:\n%s", pk)
+	}
+
+	// manual snapshots
+	h.ok("snapshot", "create", "t", "--label", "manual1")
+	h.fail("already exists", "snapshot", "create", "t", "--label", "manual1")
+	mustContain(t, h.ok("snapshot", "list", "t"), "manual1")
+	h.ok("snapshot", "drop", "t", "manual1", "--yes")
+	if strings.Contains(h.ok("snapshot", "list", "t"), "manual1") {
+		t.Fatal("manual1 not dropped")
+	}
+	h.fail("no snapshot labelled", "rollback", "t", "manual1", "--yes")
+}

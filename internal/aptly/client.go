@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ErrReadOnly is returned when a read-only client is asked to modify state.
@@ -289,9 +290,11 @@ func (c *Client) CreateRepo(ctx context.Context, r Repo) error {
 }
 
 // DropRepo deletes a local repo. Note: aptly deletes repos that still contain
-// packages; callers must check emptiness first.
+// packages; callers must check emptiness first. force=1 only skips aptly's
+// "repo has snapshots" check (snapshots survive and keep their packages);
+// aptly still refuses to drop a published repo.
 func (c *Client) DropRepo(ctx context.Context, name string) error {
-	return c.send(ctx, http.MethodDelete, "/repos/"+url.PathEscape(name), nil, nil)
+	return c.send(ctx, http.MethodDelete, "/repos/"+url.PathEscape(name)+"?force=1", nil, nil)
 }
 
 // DeletePackages removes packages (by key) from a local repo.
@@ -407,4 +410,44 @@ func (c *Client) DropPendingSources(ctx context.Context, storage, prefix, dist s
 func (c *Client) UpdatePublish(ctx context.Context, storage, prefix, dist string, s Signing, forceOverwrite bool) error {
 	return c.send(ctx, http.MethodPost, "/publish/"+PublishPath(storage, prefix)+"/"+distPath(dist)+"/update",
 		map[string]any{"Signing": s, "ForceOverwrite": forceOverwrite}, nil)
+}
+
+// ---- snapshots ----
+
+// Snapshot is an aptly snapshot.
+type Snapshot struct {
+	Name        string    `json:"Name"`
+	Description string    `json:"Description"`
+	SourceKind  string    `json:"SourceKind"`
+	CreatedAt   time.Time `json:"CreatedAt"`
+}
+
+// Snapshots lists all snapshots.
+func (c *Client) Snapshots(ctx context.Context) ([]Snapshot, error) {
+	var out []Snapshot
+	return out, c.get(ctx, "/snapshots", &out)
+}
+
+// SnapshotPackageKeys lists the package keys of a snapshot.
+func (c *Client) SnapshotPackageKeys(ctx context.Context, name string) ([]string, error) {
+	var out []string
+	return out, c.get(ctx, "/snapshots/"+url.PathEscape(name)+"/packages", &out)
+}
+
+// SnapshotRepo creates a snapshot of a local repo's current contents.
+func (c *Client) SnapshotRepo(ctx context.Context, repo, name, description string) error {
+	return c.send(ctx, http.MethodPost, "/repos/"+url.PathEscape(repo)+"/snapshots",
+		map[string]string{"Name": name, "Description": description}, nil)
+}
+
+// DropSnapshot deletes a snapshot.
+func (c *Client) DropSnapshot(ctx context.Context, name string) error {
+	return c.send(ctx, http.MethodDelete, "/snapshots/"+url.PathEscape(name), nil, nil)
+}
+
+// AddPackages adds packages (by key) that aptly already knows, e.g. from a
+// snapshot, to a local repo.
+func (c *Client) AddPackages(ctx context.Context, repo string, keys []string) error {
+	return c.send(ctx, http.MethodPost, "/repos/"+url.PathEscape(repo)+"/packages",
+		map[string][]string{"PackageRefs": keys}, nil)
 }

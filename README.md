@@ -15,6 +15,9 @@ $ aptrix add boards rk3588 *.deb    # dist taken from the "~<dist>" version suff
 $ aptrix add tools main tool_1.0_all.deb --dist all
 $ aptrix ls boards rk3588 --dist noble
 $ aptrix rm boards rk3588 linux-image-6.6-rk3588 --keep 3   # keep newest 3 versions
+$ aptrix rm boards rk3588 '*-dbg'   # glob; snapshots the affected repos first
+$ aptrix snapshot list boards       # snapshot labels
+$ aptrix rollback boards pre-rm-20261118-170000.123   # restore and republish
 $ aptrix sync --prune               # also remove what the config no longer has
 ```
 
@@ -95,6 +98,12 @@ reverse proxy.
 - `add` fails when aptly reports a conflicting package (same
   name/version/arch, different content). `--force-replace` replaces it and
   overwrites the published file.
+- `rm` snapshots every repo it touches (label `pre-rm-<time>`) before
+  removing; `aptrix rollback <alias> <label>` restores those repos exactly
+  (re-adds and removes packages) and republishes. A rollback snapshots the
+  current state first (`pre-rollback-<time>`), so it can be undone too.
+  Snapshots keep their packages in aptly's pool; drop old labels with
+  `aptrix snapshot drop <alias> <label>`.
 - `signing.skip` is only accepted against a loopback aptly (tests).
 
 ## Development
