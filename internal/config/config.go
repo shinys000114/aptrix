@@ -7,12 +7,15 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -100,13 +103,49 @@ func Find(explicit string) (string, error) {
 	return "", fmt.Errorf("no config file found (tried %s); use -c or APTRIX_CONFIG", strings.Join(DefaultPaths(), ", "))
 }
 
-// Load reads and validates a config file.
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+// IsURL reports whether a config location is an http(s) URL.
+func IsURL(loc string) bool {
+	return strings.HasPrefix(loc, "http://") || strings.HasPrefix(loc, "https://")
+}
+
+// maxRemoteConfig bounds how much is read from a config URL.
+const maxRemoteConfig = 1 << 20
+
+// Load reads and validates a config file, or fetches it when loc is an
+// http(s) URL. A URL lets many hosts share one config; it is fetched on
+// every run (no cache) and any failure is an error.
+func Load(loc string) (*Config, error) {
+	var data []byte
+	var err error
+	if IsURL(loc) {
+		data, err = fetch(loc)
+	} else {
+		data, err = os.ReadFile(loc)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return Parse(data)
+}
+
+func fetch(u string) ([]byte, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(u)
+	if err != nil {
+		return nil, fmt.Errorf("fetching config: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetching config %s: HTTP %d", u, resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxRemoteConfig+1))
+	if err != nil {
+		return nil, fmt.Errorf("fetching config %s: %w", u, err)
+	}
+	if len(data) > maxRemoteConfig {
+		return nil, fmt.Errorf("config %s is larger than %d bytes", u, maxRemoteConfig)
+	}
+	return data, nil
 }
 
 // Parse decodes and validates TOML data.

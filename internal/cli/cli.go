@@ -30,7 +30,7 @@ var ErrUsage = errors.New("usage error")
 const usage = `aptrix - manage aptly dist x component matrices from a TOML file
 
 Usage:
-  aptrix [-c aptrix.toml] [--url URL] <command> [args]
+  aptrix [-c FILE|URL] [--url URL] <command> [args]
 
 Commands:
   plan   [alias...]                         show what sync would change (read-only)
@@ -45,7 +45,8 @@ Commands:
 Run "aptrix <command> -h" for command flags.
 
 Environment:
-  APTRIX_CONFIG                 config file (default: ./aptrix.toml, ~/.config/aptrix/aptrix.toml, /etc/aptrix/aptrix.toml)
+  APTRIX_CONFIG                 config file or http(s) URL (default: ./aptrix.toml,
+                                ~/.config/aptrix/aptrix.toml, /etc/aptrix/aptrix.toml)
   APTRIX_URL                    overrides aptly.url
   APTRIX_TOKEN                  sent as "Authorization: Bearer"
   APTRIX_USERNAME, APTRIX_PASSWORD  HTTP basic auth
@@ -82,8 +83,8 @@ func RunWith(ctx context.Context, args []string, s Streams) error {
 	gf := flag.NewFlagSet("aptrix", flag.ContinueOnError)
 	gf.SetOutput(stderr)
 	gf.Usage = func() { fmt.Fprint(stderr, usage) }
-	gf.StringVar(&e.cfgPath, "c", "", "config file")
-	gf.StringVar(&e.cfgPath, "config", "", "config file")
+	gf.StringVar(&e.cfgPath, "c", "", "config file or http(s) URL")
+	gf.StringVar(&e.cfgPath, "config", "", "config file or http(s) URL")
 	gf.StringVar(&e.url, "url", "", "aptly API URL (overrides config)")
 	if err := gf.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

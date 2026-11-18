@@ -3,6 +3,9 @@
 package config
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -82,5 +85,40 @@ func TestParseErrors(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("want error containing %q, got %v", want, err)
 		}
+	}
+}
+
+func TestLoadURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/aptrix.toml":
+			w.Write([]byte(good))
+		case "/big.toml":
+			w.Write(bytes.Repeat([]byte("#"), maxRemoteConfig+1))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	if !IsURL(srv.URL+"/aptrix.toml") || IsURL("/etc/aptrix/aptrix.toml") {
+		t.Fatal("IsURL")
+	}
+	c, err := Load(srv.URL + "/aptrix.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Publish["board"]; !ok {
+		t.Fatal("remote config not parsed")
+	}
+	if _, err := Load(srv.URL + "/missing.toml"); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("404 should fail, got %v", err)
+	}
+	if _, err := Load(srv.URL + "/big.toml"); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("oversize should fail, got %v", err)
+	}
+	t.Setenv("APTRIX_CONFIG", srv.URL+"/aptrix.toml")
+	if loc, err := Find(""); err != nil || loc != srv.URL+"/aptrix.toml" {
+		t.Fatalf("Find with URL env = %q, %v", loc, err)
 	}
 }

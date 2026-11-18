@@ -61,6 +61,22 @@ architectures = ["arm64"]
 rk3588 = ["noble"]
 ```
 
+### One config for many hosts
+
+`-c` and `APTRIX_CONFIG` also accept an `http(s)://` URL. Serve one
+`aptrix.toml` from the aptly host and point CI agents and workstations at it,
+so a dist or component change is made in one place:
+
+```sh
+export APTRIX_CONFIG=http://aptly.example.lan:8089/aptrix.toml
+aptrix plan
+```
+
+The URL is fetched on every run (no cache) and any failure aborts. The file
+contains no secrets, but it describes your repository layout, so serve it on
+an internal network only. Hosts that reach aptly through a different address
+can keep the shared file and set `APTRIX_URL`.
+
 Environment: `APTRIX_URL` overrides `aptly.url`; `APTRIX_TOKEN` (Bearer) or
 `APTRIX_USERNAME`/`APTRIX_PASSWORD` (basic auth) for an aptly API behind a
 reverse proxy.
