@@ -22,12 +22,19 @@ builds:
       - -s -w -X main.version={{ .Version }} -X main.commit={{ .ShortCommit }} -X main.date={{ .Date }}
 
 archives:
-  - formats: [tar.gz]
+  - id: tarball
+    ids: [aptrix]
+    formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
       - README.md
       - examples/aptrix.example.toml
+  # Bare executables, e.g. aptrix_0.1.0_linux_amd64, for curl-and-run installs.
+  - id: binary
+    ids: [aptrix]
+    formats: [binary]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 nfpms:
   - id: deb
