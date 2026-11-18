@@ -27,11 +27,12 @@ integration: $(APTLY)
 aptly: $(APTLY)
 
 # Build the pinned aptly from source (distro packages are too old).
+# GOTOOLCHAIN=auto: aptly may need a newer Go than this module (setup-go sets local).
 $(APTLY):
 	rm -rf .cache/aptly/src
 	git clone -q --depth 1 --branch v$(APTLY_VERSION) https://github.com/aptly-dev/aptly.git .cache/aptly/src
 	echo $(APTLY_VERSION) > .cache/aptly/src/VERSION
-	cd .cache/aptly/src && CGO_ENABLED=0 go build -o $(APTLY) .
+	cd .cache/aptly/src && GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o $(APTLY) .
 	rm -rf .cache/aptly/src
 
 # Local release dry run: binaries, tarballs and .deb packages in dist/.
