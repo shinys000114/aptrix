@@ -1,0 +1,39 @@
+# aptrix example configuration.
+# Copy to ./aptrix.toml, ~/.config/aptrix/aptrix.toml or /etc/aptrix/aptrix.toml.
+# Credentials are read from APTRIX_TOKEN or APTRIX_USERNAME/APTRIX_PASSWORD.
+
+[aptly]
+url = "http://127.0.0.1:8080"
+
+[signing]
+gpg_key = "0123456789ABCDEF0123456789ABCDEF01234567"
+# Path on the aptly server, not on the machine running aptrix.
+passphrase_file = "/var/lib/aptly/gpg-passphrase"
+
+# One [publish.<alias>] table per published prefix. The alias is what you
+# type on the command line: "aptrix add boards rk3588 foo.deb".
+[publish.boards]
+storage = "filesystem:public"   # aptly FileSystemPublishEndpoints name, "" = default root
+prefix = "boards"
+dists = ["jammy", "noble", "resolute"]
+components = ["main", "rk3588", "amlogic", "rk3588-factory"]
+architectures = ["arm64"]
+origin = "example"
+label = "Example boards"
+# Local repo names; {dist} and {component} are substituted.
+# Default: "<prefix>-{dist}-{component}".
+repo_name = "boards-{dist}-{component}"
+comment = "example packages for {dist}/{component}"
+
+# Optional: publish a component for only some dists.
+[publish.boards.only]
+rk3588-factory = ["noble", "resolute"]
+
+# A single-component publish whose repos are named "<tool>-{dist}".
+[publish.tools]
+storage = "filesystem:public"
+prefix = "tools"
+repo_name = "tools-{dist}"
+dists = ["jammy", "noble", "resolute"]
+components = ["main"]
+architectures = ["amd64", "arm64"]

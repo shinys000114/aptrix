@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Release: push a tag "vX.Y.Z"; GitHub Actions runs goreleaser.
+# Local dry run: make snapshot
+version: 2
+
+project_name: aptrix
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: aptrix
+    main: ./cmd/aptrix
+    binary: aptrix
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .ShortCommit }} -X main.date={{ .Date }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - examples/aptrix.example.toml
+
+nfpms:
+  - id: deb
+    package_name: aptrix
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: shinys000114
+    homepage: https://github.com/shinys000114/aptrix
+    maintainer: shinys000114 <shinys000114@users.noreply.github.com>
+    description: |-
+      Manage aptly dist x component matrices from a TOML file.
+      aptrix creates and removes aptly local repos, publish components and
+      distributions to match a declarative config, and adds or removes
+      packages across many dists and components with one command.
+    license: GPL-3.0-only
+    section: admin
+    priority: optional
+    formats: [deb]
+    contents:
+      - src: examples/aptrix.example.toml
+        dst: /usr/share/doc/aptrix/aptrix.example.toml
+      - src: LICENSE
+        dst: /usr/share/doc/aptrix/copyright
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next+{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^ci:"]
+
+release:
+  github:
+    owner: shinys000114
+    name: aptrix

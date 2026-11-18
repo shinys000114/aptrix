@@ -1,0 +1,6 @@
+/bin/
+/dist/
+/.cache/
+# Real configs contain internal hosts, key ids and paths; keep them out of git.
+/aptrix.toml
+*.local.toml
