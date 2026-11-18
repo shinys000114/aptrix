@@ -12,8 +12,12 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -482,4 +486,215 @@ architectures = ["arm64"]
 		t.Fatal("manual1 not dropped")
 	}
 	h.fail("no snapshot labelled", "rollback", "t", "manual1", "--yes")
+}
+
+const featureConfig = `
+[publish.b]
+storage = "filesystem:test"
+prefix = "b"
+dists = ["jammy", "noble"]
+components = ["main", "testing"]
+architectures = ["arm64"]
+keep = 2
+`
+
+func (h *harness) packagesOf(prefix, dist, comp string) string {
+	return h.read(prefix + "/dists/" + dist + "/" + comp + "/binary-arm64/Packages")
+}
+
+func TestRetentionPromoteFindURL(t *testing.T) {
+	h := start(t)
+	h.config(featureConfig)
+	h.ok("sync", "--yes")
+
+	// keep = 2: adding three versions leaves the newest two, after a snapshot
+	out := h.ok("add", "b", "main", h.deb("kern", "1.0~noble", "arm64", "a"), h.deb("kern", "1.1~noble", "arm64", "a"), h.deb("kern", "1.2~noble", "arm64", "a"))
+	mustContain(t, out, "snapshot pre-add-")
+	mustContain(t, out, "removed 1 from b-noble-main (keep 2)")
+	pk := h.packagesOf("b", "noble", "main")
+	if strings.Contains(pk, "Version: 1.0~noble") || !strings.Contains(pk, "Version: 1.2~noble") {
+		t.Fatalf("keep 2 not applied:\n%s", pk)
+	}
+
+	// add from URLs with a checksums file
+	tool := h.deb("tool", "1.0", "all", "a")
+	sum := sha256.Sum256(must(os.ReadFile(tool)))
+	files := http.FileServer(http.Dir(filepath.Dir(tool)))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/checksums.txt":
+			fmt.Fprintf(w, "%x  tool_1.0_all.deb\n", sum)
+		case "/bad.txt":
+			fmt.Fprintf(w, "%064x  tool_1.0_all.deb\n", 0)
+		case "/other.txt":
+			fmt.Fprintf(w, "%x  something_else.deb\n", sum)
+		default:
+			files.ServeHTTP(w, r)
+		}
+	}))
+	defer srv.Close()
+	h.fail("does not match", "add", "b", "main", "--dist", "all", srv.URL+"/tool_1.0_all.deb", "--checksums", srv.URL+"/bad.txt")
+	h.fail("is not listed", "add", "b", "main", "--dist", "all", srv.URL+"/tool_1.0_all.deb", "--checksums", srv.URL+"/other.txt")
+	mustContain(t, h.ok("add", "b", "main", "--dist", "all", srv.URL+"/tool_1.0_all.deb", "--checksums", srv.URL+"/checksums.txt"), "checksums ok (1 file(s))")
+	mustContain(t, h.packagesOf("b", "jammy", "main"), "Package: tool")
+
+	// find
+	out = h.ok("find", "kern", "t*")
+	mustContain(t, out, "4 package(s)") // k 1.2, k 1.1, tool jammy, tool noble
+	mustContain(t, h.ok("find", "kern", "--newest"), "1 package(s)")
+	var found []map[string]string
+	if err := json.Unmarshal([]byte(h.ok("find", "kern", "--version", ">=1.2~noble", "--json")), &found); err != nil || len(found) != 1 || found[0]["version"] != "1.2~noble" {
+		t.Fatalf("find --json: %v %v", found, err)
+	}
+
+	// manual snapshot for diff later
+	h.ok("snapshot", "create", "b", "--label", "before-promote")
+
+	// promote copies the newest version; a second run is a no-op
+	out = h.ok("promote", "b/main", "b/testing", "kern", "--yes")
+	mustContain(t, out, "added 1 to b-noble-testing")
+	mustContain(t, h.packagesOf("b", "noble", "testing"), "Version: 1.2~noble")
+	mustContain(t, h.ok("promote", "b/main", "b/testing", "kern", "--yes"), "Nothing to promote (1 already present)")
+	// --to-dist
+	h.ok("promote", "b/main", "b/testing", "tool", "--dist", "noble", "--to-dist", "jammy", "--yes")
+	mustContain(t, h.packagesOf("b", "jammy", "testing"), "Package: tool")
+	// --move back out of testing
+	h.ok("promote", "b/testing", "b/main", "kern", "--move", "--yes")
+	if strings.Contains(h.packagesOf("b", "noble", "testing"), "Package: kern\n") {
+		t.Fatal("move left k in testing")
+	}
+	mustContain(t, h.packagesOf("b", "noble", "main"), "Version: 1.2~noble")
+
+	// prune-versions
+	out = h.ok("prune-versions", "b", "main", "--keep", "1", "--yes")
+	mustContain(t, out, "removed 1 from b-noble-main (keep 1)")
+	if strings.Contains(h.packagesOf("b", "noble", "main"), "Version: 1.1~noble") {
+		t.Fatal("prune-versions kept 1.1")
+	}
+	mustContain(t, h.ok("prune-versions", "b", "--keep", "1", "--yes"), "Nothing to prune")
+
+	// snapshot diff: label -> now, and label -> label
+	out = h.ok("snapshot", "diff", "b", "before-promote")
+	mustContain(t, out, "before-promote -> now")
+	mustContain(t, out, "- noble  main     kern  1.1~noble")
+	mustContain(t, out, "+ jammy  testing  tool  1.0")
+	h.ok("snapshot", "create", "b", "--label", "after")
+	var diff []map[string]string
+	if err := json.Unmarshal([]byte(h.ok("snapshot", "diff", "b", "before-promote", "after", "--json")), &diff); err != nil || len(diff) != 2 { // kern copied to testing then moved back: net zero
+		t.Fatalf("diff --json: %v %v", diff, err)
+	}
+	mustContain(t, h.ok("snapshot", "diff", "b", "after"), "No differences.")
+
+	// JSON outputs parse
+	var status []map[string]any
+	if err := json.Unmarshal([]byte(h.ok("status", "--json")), &status); err != nil || len(status) != 4 {
+		t.Fatalf("status --json: %v %v", status, err)
+	}
+	var planOut map[string]any
+	if err := json.Unmarshal([]byte(h.ok("plan", "--json")), &planOut); err != nil || len(planOut["steps"].([]any)) != 0 {
+		t.Fatalf("plan --json: %v %v", planOut, err)
+	}
+	var labelsOut []map[string]any
+	if err := json.Unmarshal([]byte(h.ok("snapshot", "list", "b", "--json")), &labelsOut); err != nil || len(labelsOut) < 3 {
+		t.Fatalf("snapshot list --json: %v %v", labelsOut, err)
+	}
+
+	// snapshot prune: automatic labels only, unless --include-manual
+	h.ok("snapshot", "prune", "b", "--older-than", "0s", "--yes")
+	list := h.ok("snapshot", "list", "b")
+	if strings.Contains(list, "pre-") || !strings.Contains(list, "before-promote") {
+		t.Fatalf("prune should drop only automatic labels:\n%s", list)
+	}
+	h.ok("snapshot", "prune", "b", "--older-than", "0s", "--include-manual", "--yes")
+	mustContain(t, h.ok("snapshot", "list", "b"), "0 snapshot label(s)")
+
+	// gc
+	mustContain(t, h.ok("gc", "--yes"), "done")
+	h.fail("--yes", "gc")
+}
+
+func TestSnapshotExpiry(t *testing.T) {
+	h := start(t)
+	h.config(strings.Replace(featureConfig, "keep = 2", `snapshot_max_age = "1s"`, 1))
+	h.ok("sync", "--yes")
+	h.ok("add", "b", "main", h.deb("kern", "1.0~noble", "arm64", "a"), h.deb("kern", "1.1~noble", "arm64", "a"))
+	first := labelFrom(t, h.ok("rm", "b", "main", "kern=1.0~noble", "--yes"), "pre-rm-")
+	time.Sleep(2 * time.Second)
+	out := h.ok("rm", "b", "main", "kern=1.1~noble", "--yes")
+	mustContain(t, out, "expired snapshot "+first)
+	second := labelFrom(t, out, "pre-rm-")
+	list := h.ok("snapshot", "list", "b")
+	if strings.Contains(list, first) || !strings.Contains(list, second) {
+		t.Fatalf("expiry kept the wrong labels:\n%s", list)
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+func TestCrossPublishPromote(t *testing.T) {
+	h := start(t)
+	h.config(featureConfig + `
+[publish.pub]
+storage = "filesystem:test"
+prefix = "pub"
+dists = ["noble"]
+components = ["main"]
+architectures = ["amd64"]
+`)
+	h.ok("sync", "--yes")
+	h.ok("add", "b", "main", h.deb("kern", "1.0~noble", "arm64", "a"))
+	h.ok("add", "b", "main", "--dist", "all", h.deb("tool", "1.0", "all", "a"))
+
+	// destination does not publish arm64
+	h.fail("architecture arm64 is not published by pub", "promote", "b/main", "pub/main", "kern", "--yes")
+
+	// same repo as source: refused, nothing deleted
+	h.fail("destination is the source repo", "promote", "b/main", "b/main", "tool", "--dist", "noble", "--to-dist", "noble", "--move", "--yes")
+	mustContain(t, h.packagesOf("b", "noble", "main"), "Package: tool")
+
+	// cross-publish move: only the dist both sides have (noble)
+	out := h.ok("promote", "b/main", "pub/main", "tool", "--move", "--yes")
+	mustContain(t, out, "added 1 to pub-noble-main")
+	mustContain(t, out, "removed 1 from b-noble-main (moved)")
+	if strings.Count(out, "snapshot pre-promote-") != 2 {
+		t.Fatalf("expected one snapshot per publish:\n%s", out)
+	}
+	mustContain(t, h.read("pub/dists/noble/main/binary-amd64/Packages"), "Package: tool")
+	if strings.Contains(h.packagesOf("b", "noble", "main"), "Package: tool") {
+		t.Fatal("tool still published in b noble after move")
+	}
+	mustContain(t, h.packagesOf("b", "jammy", "main"), "Package: tool") // jammy untouched
+}
+
+func TestGCKeepsSnapshots(t *testing.T) {
+	h := start(t)
+	h.config(featureConfig)
+	h.ok("sync", "--yes")
+	h.ok("add", "b", "main", h.deb("kern", "1.0~noble", "arm64", "a"), h.deb("kern-dbg", "1.0~noble", "arm64", "a"))
+	label := labelFrom(t, h.ok("rm", "b", "main", "*-dbg", "--yes"), "pre-rm-")
+	h.ok("gc", "--yes")
+	// the snapshot still pins the package, so rollback works after gc
+	mustContain(t, h.ok("rollback", "b", label, "--yes"), "restored b-noble-main (+1 -0)")
+	pk := h.packagesOf("b", "noble", "main")
+	mustContain(t, pk, "Package: kern-dbg")
+	var fn string
+	for _, l := range strings.Split(pk, "\n") {
+		if strings.HasPrefix(l, "Filename: ") && strings.Contains(l, "kern-dbg") {
+			fn = strings.TrimPrefix(l, "Filename: ")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(h.pub, "b", fn)); err != nil {
+		t.Fatalf("restored package file missing from the published pool: %v", err)
+	}
+
+	// without a snapshot, gc really frees it and rollback cannot help
+	h.ok("rm", "b", "main", "*-dbg", "--yes", "--no-snapshot")
+	h.ok("snapshot", "prune", "b", "--older-than", "0s", "--yes")
+	h.ok("gc", "--yes")
+	h.fail("no snapshot labelled", "rollback", "b", label, "--yes")
 }

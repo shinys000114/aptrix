@@ -24,6 +24,10 @@ label = "Example boards"
 # Default: "<prefix>-{dist}-{component}".
 repo_name = "boards-{dist}-{component}"
 comment = "example packages for {dist}/{component}"
+# Keep only the newest 3 versions of each package after add/promote.
+keep = 3
+# Expire aptrix's automatic pre-* snapshots older than this.
+snapshot_max_age = "30d"
 
 # Optional: publish a component for only some dists.
 [publish.boards.only]

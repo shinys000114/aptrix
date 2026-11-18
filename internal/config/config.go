@@ -67,6 +67,30 @@ type Publish struct {
 
 	Origin string `toml:"origin"`
 	Label  string `toml:"label"`
+
+	// Keep, when > 0, keeps only the newest Keep versions of each package
+	// (per dist, component and architecture) after add and promote.
+	Keep int `toml:"keep"`
+	// SnapshotMaxAge, e.g. "30d", drops aptrix's automatic snapshots
+	// (pre-*) of this publish that are older than this, after each change.
+	SnapshotMaxAge string `toml:"snapshot_max_age"`
+}
+
+// ParseAge parses durations like "30d", "12h", "90m" (Go syntax plus "d").
+func ParseAge(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "d") {
+		var n int
+		if _, err := fmt.Sscanf(strings.TrimSuffix(s, "d"), "%d", &n); err != nil || n < 0 || fmt.Sprint(n)+"d" != s {
+			return 0, fmt.Errorf("invalid age %q", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid age %q (use e.g. 30d, 12h)", s)
+	}
+	return d, nil
 }
 
 // Cell is one (dist, component) pair and the local repo backing it.
@@ -230,6 +254,16 @@ func (c *Config) validate() error {
 				if !slices.Contains(p.Dists, d) {
 					errs = append(errs, fmt.Errorf("%s.only.%s: %q is not in dists", where, comp, d))
 				}
+			}
+		}
+		if p.Keep < 0 {
+			errs = append(errs, fmt.Errorf("%s: keep must be >= 0", where))
+		}
+		if p.SnapshotMaxAge != "" {
+			if d, err := ParseAge(p.SnapshotMaxAge); err != nil {
+				errs = append(errs, fmt.Errorf("%s: snapshot_max_age: %v", where, err))
+			} else if d <= 0 {
+				errs = append(errs, fmt.Errorf("%s: snapshot_max_age must be > 0", where))
 			}
 		}
 		target := p.Storage + ":" + p.Prefix

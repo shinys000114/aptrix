@@ -33,18 +33,32 @@ Usage:
   aptrix [-c FILE|URL] [--url URL] <command> [args]
 
 Commands:
-  plan   [alias...]                         show what sync would change (read-only)
+  plan   [alias...] [--json]                show what sync would change (read-only)
   sync   [alias...] [--prune] [--force]     create/remove repos, components and dists
-  status [alias...]                         package count per dist x component (read-only)
-  ls     <alias> [component] [--dist d,..]  list packages (read-only)
-  add    <alias> <component> <file.deb>...  add packages and republish
-  rm     <alias> <component> <package|glob>[=version] [--keep N]
+  status [alias...] [--json]                package count per dist x component (read-only)
+  ls     <alias> [component] [--name glob] [--version cond]
+                                            list packages (read-only)
+  find   <glob>... [--alias a] [--version cond]
+                                            search packages in every publish (read-only)
+  add    <alias> <component> <file.deb|URL>... [--checksums file|URL]
+                                            add packages, apply keep, republish
+  rm     <alias> <component> <glob>[=version]... [--keep N] [--version cond]
                                             remove packages (snapshot first) and republish
+  promote <alias>/<comp> <alias>/<comp> <glob>[=version]... [--move]
+                                            copy/move packages between cells
+  prune-versions <alias> [component] [--keep N]
+                                            keep only the newest N versions of every package
   snapshot create <alias> [component] [--label L]   snapshot repos under one label
-  snapshot list   <alias>                   list snapshot labels (read-only)
+  snapshot list   <alias> [--json]          list snapshot labels (read-only)
+  snapshot diff   <alias> <label> [label2]  what changed since a label (read-only)
   snapshot drop   <alias> <label>           delete the snapshots of a label
+  snapshot prune  <alias> --older-than 30d  delete old automatic snapshots
   rollback <alias> <label> [component]      restore repos to a snapshot label and republish
+  gc                                        aptly db cleanup: free unreferenced pool files
   version                                   print version
+
+Package names are shell-style globs ("linux-image-*", "*-dbg"); quote them.
+Version conditions use dpkg ordering: ">=1.2", "<2.0", ">=1.0,<2.0", "!=1.1".
 
 Run "aptrix <command> -h" for command flags.
 
@@ -117,6 +131,14 @@ func RunWith(ctx context.Context, args []string, s Streams) error {
 		return e.cmdRm(rest)
 	case "snapshot", "snapshots":
 		return e.cmdSnapshot(rest)
+	case "promote", "copy":
+		return e.cmdPromote(rest)
+	case "find", "search":
+		return e.cmdFind(rest)
+	case "prune-versions":
+		return e.cmdPruneVersions(rest)
+	case "gc":
+		return e.cmdGC(rest)
 	case "rollback":
 		return e.cmdRollback(rest)
 	case "version":

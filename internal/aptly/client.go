@@ -451,3 +451,9 @@ func (c *Client) AddPackages(ctx context.Context, repo string, keys []string) er
 	return c.send(ctx, http.MethodPost, "/repos/"+url.PathEscape(repo)+"/packages",
 		map[string][]string{"PackageRefs": keys}, nil)
 }
+
+// DBCleanup removes packages no repo or snapshot references and deletes
+// unreferenced pool files (aptly db cleanup). It affects the whole server.
+func (c *Client) DBCleanup(ctx context.Context) error {
+	return c.send(ctx, http.MethodPost, "/db/cleanup", nil, nil)
+}

@@ -23,6 +23,7 @@ func (e *env) cmdSync(args []string, dryRun bool) error {
 	force := fs.Bool("force", false, "with --prune, also delete repos that still contain packages")
 	yes := fs.Bool("yes", false, "do not ask for confirmation")
 	discard := fs.Bool("discard-staged", false, "drop source changes left staged by another run")
+	asJSON := fs.Bool("json", false, "JSON output (plan only)")
 	aliases, err := parse(fs, args)
 	if err != nil {
 		return ErrUsage
@@ -45,6 +46,9 @@ func (e *env) cmdSync(args []string, dryRun bool) error {
 		return err
 	}
 	pl := plan.Make(pubs, st, plan.Options{Prune: *prune, Force: *force})
+	if *asJSON && dryRun {
+		return e.planJSON(pl)
+	}
 	e.printPlan(pl)
 	if dryRun || len(pl.Steps) == 0 {
 		return nil
@@ -84,8 +88,38 @@ func (e *env) printPlan(pl *plan.Plan) {
 	fmt.Fprintf(e.stdout, "%d change(s)\n", len(pl.Steps))
 }
 
+func (e *env) planJSON(pl *plan.Plan) error {
+	type step struct {
+		Kind        string `json:"kind"`
+		Publish     string `json:"publish"`
+		Target      string `json:"target"`
+		Dist        string `json:"dist,omitempty"`
+		Component   string `json:"component,omitempty"`
+		Repo        string `json:"repo,omitempty"`
+		OldRepo     string `json:"old_repo,omitempty"`
+		Destructive bool   `json:"destructive"`
+		Text        string `json:"text"`
+	}
+	out := struct {
+		Steps    []step   `json:"steps"`
+		Warnings []string `json:"warnings"`
+		Blocked  []string `json:"blocked"`
+	}{Steps: []step{}, Warnings: pl.Warnings, Blocked: pl.Blocked}
+	for _, s := range pl.Steps {
+		out.Steps = append(out.Steps, step{string(s.Kind), s.Publish.Alias, s.Publish.Target(), s.Dist, s.Component, s.Repo, s.OldRepo, s.Destructive, strings.Join(strings.Fields(s.String()), " ")})
+	}
+	if out.Warnings == nil {
+		out.Warnings = []string{}
+	}
+	if out.Blocked == nil {
+		out.Blocked = []string{}
+	}
+	return e.json(out)
+}
+
 func (e *env) cmdStatus(args []string) error {
-	fs := newFlags(e, "status", "[alias...]")
+	fs := newFlags(e, "status", "[alias...] [--json]")
+	asJSON := fs.Bool("json", false, "JSON output")
 	aliases, err := parse(fs, args)
 	if err != nil {
 		return ErrUsage
@@ -105,6 +139,27 @@ func (e *env) cmdStatus(args []string) error {
 	st, err := plan.Load(e.ctx, c, pubs)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		type cell struct {
+			Publish   string `json:"publish"`
+			Dist      string `json:"dist"`
+			Component string `json:"component"`
+			Repo      string `json:"repo"`
+			Exists    bool   `json:"exists"`
+			Published bool   `json:"published"`
+			Packages  int    `json:"packages"`
+		}
+		out := []cell{}
+		for _, p := range pubs {
+			for _, cl := range p.Cells() {
+				_, exists := st.Repos[cl.Repo]
+				cur, ok := st.Published(p, cl.Dist)
+				pub := ok && slices.Contains(cur.Sources, aptly.Source{Component: cl.Component, Name: cl.Repo})
+				out = append(out, cell{p.Alias, cl.Dist, cl.Component, cl.Repo, exists, pub, st.PackageCount[cl.Repo]})
+			}
+		}
+		return e.json(out)
 	}
 	for i, p := range pubs {
 		if i > 0 {

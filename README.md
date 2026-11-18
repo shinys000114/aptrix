@@ -12,14 +12,23 @@ $ aptrix plan                       # what would change (read-only)
 $ aptrix sync                       # create missing repos / components / dists
 $ aptrix status boards              # package count per dist x component
 $ aptrix add boards rk3588 *.deb    # dist taken from the "~<dist>" version suffix
-$ aptrix add tools main tool_1.0_all.deb --dist all
-$ aptrix ls boards rk3588 --dist noble
-$ aptrix rm boards rk3588 linux-image-6.6-rk3588 --keep 3   # keep newest 3 versions
-$ aptrix rm boards rk3588 '*-dbg'   # glob; snapshots the affected repos first
-$ aptrix snapshot list boards       # snapshot labels
-$ aptrix rollback boards pre-rm-20261118-170000.123   # restore and republish
+$ aptrix add tools main --dist all https://example.com/tool_1.0_all.deb --checksums https://example.com/checksums.txt
+$ aptrix ls boards rk3588 --dist noble --name 'linux-image-*'
+$ aptrix find 'linux-image-*rk3588*' --newest            # search every publish
+$ aptrix promote internal/rk3588 boards/rk3588 'linux-*' # copy newest versions, no re-upload
+$ aptrix rm boards rk3588 '*-dbg'   # snapshots the affected repos first
+$ aptrix prune-versions boards --keep 3
+$ aptrix snapshot diff boards pre-rm-20261118-170000.123 # what changed since then
+$ aptrix rollback boards pre-rm-20261118-170000.123      # restore and republish
+$ aptrix snapshot prune boards --older-than 30d && aptrix gc
 $ aptrix sync --prune               # also remove what the config no longer has
 ```
+
+Package names are shell-style globs (`*`, `?`, `[...]`); quote them so the
+shell does not expand them. Version conditions use dpkg ordering:
+`--version '>=1.2'`, `'>=1.0,<2.0'`, `'!=1.1'`. Numbers compare by value, so
+write full versions (`<9:6.6.144-202609010000`), not prefixes. `ls`, `find`,
+`status`, `plan`, `snapshot list` and `snapshot diff` accept `--json`.
 
 It talks to the aptly REST API (`aptly api serve`), so it works the same from a
 workstation, a CI agent or the aptly host. Requires **aptly 1.6 or newer**
@@ -63,6 +72,17 @@ architectures = ["arm64"]
 [publish.boards.only]          # optional: component only in some dists
 rk3588 = ["noble"]
 ```
+
+Optional per publish:
+
+- `keep = 3` keeps the newest 3 versions of each package (per dist, component
+  and architecture) after every `add` and `promote`; `add` then snapshots the
+  target repos first, so `rollback` can undo it.
+- `snapshot_max_age = "30d"` expires aptrix's automatic snapshots
+  (`pre-add-`, `pre-rm-`, `pre-promote-`, `pre-prune-`, `pre-rollback-`) of
+  that publish after each change. Manual `snapshot create` labels are kept.
+  Freed packages stay in aptly's pool until `aptrix gc` (aptly
+  `db cleanup`, server-wide).
 
 ### One config for many hosts
 

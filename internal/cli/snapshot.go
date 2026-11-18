@@ -51,7 +51,7 @@ func (e *env) takeSnapshots(c *aptly.Client, repos []string, label, desc string)
 
 func (e *env) cmdSnapshot(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(e.stderr, "Usage: aptrix snapshot create|list|drop ...\n")
+		fmt.Fprint(e.stderr, "Usage: aptrix snapshot create|list|diff|drop|prune ...\n")
 		return ErrUsage
 	}
 	switch args[0] {
@@ -61,8 +61,12 @@ func (e *env) cmdSnapshot(args []string) error {
 		return e.snapshotList(args[1:])
 	case "drop", "rm":
 		return e.snapshotDrop(args[1:])
+	case "prune":
+		return e.snapshotPrune(args[1:])
+	case "diff":
+		return e.snapshotDiff(args[1:])
 	}
-	fmt.Fprintf(e.stderr, "unknown snapshot command %q (create, list, drop)\n", args[0])
+	fmt.Fprintf(e.stderr, "unknown snapshot command %q (create, list, drop, prune, diff)\n", args[0])
 	return ErrUsage
 }
 
@@ -182,7 +186,8 @@ func labels(snaps []aptly.Snapshot, p *config.Publish) []*labelInfo {
 }
 
 func (e *env) snapshotList(args []string) error {
-	fs := newFlags(e, "snapshot list", "<alias>")
+	fs := newFlags(e, "snapshot list", "<alias> [--json]")
+	asJSON := fs.Bool("json", false, "JSON output")
 	pos, err := parse(fs, args)
 	if err != nil || len(pos) != 1 {
 		fs.Usage()
@@ -201,6 +206,19 @@ func (e *env) snapshotList(args []string) error {
 		return err
 	}
 	ls := labels(snaps, p)
+	if *asJSON {
+		type item struct {
+			Label       string    `json:"label"`
+			Created     time.Time `json:"created"`
+			Description string    `json:"description"`
+			Repos       []string  `json:"repos"`
+		}
+		out := []item{}
+		for _, l := range ls {
+			out = append(out, item{l.Label, l.Created, l.Desc, sortedKeys(l.Snaps)})
+		}
+		return e.json(out)
+	}
 	tw := tabwriter.NewWriter(e.stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "LABEL\tCREATED\tREPOS\tDESCRIPTION")
 	for _, l := range ls {
@@ -345,7 +363,7 @@ func (e *env) cmdRollback(args []string) error {
 		}
 		fmt.Fprintf(e.stdout, "snapshot %s taken; undo with 'aptrix rollback %s %s'\n", safety, p.Alias, safety)
 	}
-	var dists []string
+	touched := map[string]config.Cell{}
 	for _, ch := range changes {
 		// Remove first: re-adding a package that conflicts with a current one
 		// (same name/version/arch, different content) would fail.
@@ -360,27 +378,10 @@ func (e *env) cmdRollback(args []string) error {
 			}
 		}
 		fmt.Fprintf(e.stdout, "restored %s (+%d -%d)\n", ch.repo, len(ch.add), len(ch.del))
-		if !slices.Contains(dists, ch.cell.Dist) {
-			dists = append(dists, ch.cell.Dist)
-		}
-	}
-	if *noPublish {
-		return nil
-	}
-	st, err := plan.Load(e.ctx, c, nil)
-	if err != nil {
-		return err
-	}
-	var publishable []string
-	for _, d := range p.Dists { // keep config order
-		if slices.Contains(dists, d) {
-			if _, ok := st.Published(p, d); ok {
-				publishable = append(publishable, d)
-			}
-		}
+		touched[ch.repo] = ch.cell
 	}
 	// A rolled-back pool file may differ from what is published now.
-	return e.republish(c, cfg, p, publishable, true)
+	return e.finish(c, cfg, p, touched, nil, true, *noPublish)
 }
 
 // diffKeys returns keys to add (in want, not have) and delete (in have, not want).
@@ -404,4 +405,227 @@ func diffKeys(have, want []string) (add, del []string) {
 	sort.Strings(add)
 	sort.Strings(del)
 	return add, del
+}
+
+// autoPrefixes are the labels aptrix creates on its own.
+var autoPrefixes = []string{"pre-add-", "pre-rm-", "pre-rollback-", "pre-promote-", "pre-prune-"}
+
+func isAutoLabel(l string) bool {
+	for _, p := range autoPrefixes {
+		if strings.HasPrefix(l, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// expireSnapshots drops automatic snapshots of p older than snapshot_max_age.
+func (e *env) expireSnapshots(c *aptly.Client, p *config.Publish) error {
+	if p.SnapshotMaxAge == "" {
+		return nil
+	}
+	age, err := config.ParseAge(p.SnapshotMaxAge)
+	if err != nil {
+		return err
+	}
+	snaps, err := c.Snapshots(e.ctx)
+	if err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-age)
+	for _, l := range labels(snaps, p) {
+		if !isAutoLabel(l.Label) || !l.Created.Before(cutoff) {
+			continue
+		}
+		for _, repo := range sortedKeys(l.Snaps) {
+			// another run (e.g. a parallel Jenkins job) may have dropped it
+			if err := c.DropSnapshot(e.ctx, l.Snaps[repo]); err != nil && !aptly.IsNotFound(err) {
+				return fmt.Errorf("expiring snapshot %s: %w", l.Snaps[repo], err)
+			}
+		}
+		fmt.Fprintf(e.stdout, "expired snapshot %s (older than %s)\n", l.Label, p.SnapshotMaxAge)
+	}
+	return nil
+}
+
+func (e *env) snapshotPrune(args []string) error {
+	fs := newFlags(e, "snapshot prune", "<alias> [--older-than 30d] [--keep-last N] [--include-manual] [--yes]")
+	older := fs.String("older-than", "", `drop labels older than this (e.g. "30d", "12h")`)
+	keepLast := fs.Int("keep-last", -1, "always keep the newest N labels")
+	manual := fs.Bool("include-manual", false, "also prune labels not created automatically (e.g. manual-*)")
+	yes := fs.Bool("yes", false, "do not ask for confirmation")
+	pos, err := parse(fs, args)
+	if err != nil || len(pos) != 1 || (*older == "" && *keepLast < 0) {
+		fs.Usage()
+		return ErrUsage
+	}
+	cfg, p, _, err := e.selectCells(pos[0], "", "")
+	if err != nil {
+		return err
+	}
+	var cutoff time.Time
+	if *older != "" {
+		age, err := config.ParseAge(*older)
+		if err != nil {
+			return err
+		}
+		cutoff = time.Now().Add(-age)
+	}
+	c, err := e.client(cfg, false)
+	if err != nil {
+		return err
+	}
+	snaps, err := c.Snapshots(e.ctx)
+	if err != nil {
+		return err
+	}
+	var victims []*labelInfo
+	n := 0
+	for _, l := range labels(snaps, p) { // newest first
+		if !*manual && !isAutoLabel(l.Label) {
+			continue
+		}
+		n++
+		if *keepLast >= 0 && n <= *keepLast {
+			continue
+		}
+		if !cutoff.IsZero() && !l.Created.Before(cutoff) {
+			continue
+		}
+		victims = append(victims, l)
+	}
+	if len(victims) == 0 {
+		fmt.Fprintln(e.stdout, "Nothing to prune.")
+		return nil
+	}
+	for _, l := range victims {
+		fmt.Fprintf(e.stdout, "- %s  %s  (%d repo(s))\n", l.Label, l.Created.Local().Format("2006-01-02 15:04:05"), len(l.Snaps))
+	}
+	if err := e.confirm(*yes, fmt.Sprintf("drop %d snapshot label(s)", len(victims))); err != nil {
+		return err
+	}
+	for _, l := range victims {
+		for _, repo := range sortedKeys(l.Snaps) {
+			if err := c.DropSnapshot(e.ctx, l.Snaps[repo]); err != nil {
+				return err
+			}
+		}
+	}
+	fmt.Fprintf(e.stdout, "dropped %d label(s); run 'aptrix gc' to free pool space\n", len(victims))
+	return nil
+}
+
+// snapshotDiff shows what changed between a label and now, or between two labels.
+func (e *env) snapshotDiff(args []string) error {
+	fs := newFlags(e, "snapshot diff", "<alias> <label> [<label2>] [--component c] [--dist d1,d2] [--json]")
+	comp := fs.String("component", "", "only this component")
+	distFlag := fs.String("dist", "", "only these dists (comma separated)")
+	asJSON := fs.Bool("json", false, "JSON output")
+	pos, err := parse(fs, args)
+	if err != nil || len(pos) < 2 || len(pos) > 3 {
+		fs.Usage()
+		return ErrUsage
+	}
+	cfg, p, cells, err := e.selectCells(pos[0], *comp, *distFlag)
+	if err != nil {
+		return err
+	}
+	c, err := e.client(cfg, true)
+	if err != nil {
+		return err
+	}
+	snaps, err := c.Snapshots(e.ctx)
+	if err != nil {
+		return err
+	}
+	find := func(label string) (*labelInfo, error) {
+		for _, l := range labels(snaps, p) {
+			if l.Label == label {
+				return l, nil
+			}
+		}
+		return nil, fmt.Errorf("no snapshot labelled %q for publish.%s", label, p.Alias)
+	}
+	from, err := find(pos[1])
+	if err != nil {
+		return err
+	}
+	var to *labelInfo
+	toName := "now"
+	if len(pos) == 3 {
+		if to, err = find(pos[2]); err != nil {
+			return err
+		}
+		toName = to.Label
+	}
+	type entry struct {
+		Dist      string `json:"dist"`
+		Component string `json:"component"`
+		Change    string `json:"change"` // "+" added since, "-" removed since
+		Package   string `json:"package"`
+		Version   string `json:"version"`
+		Arch      string `json:"architecture"`
+	}
+	var out []entry
+	for _, repo := range sortedKeys(cells) {
+		cell := cells[repo]
+		fromName, ok := from.Snaps[repo]
+		if !ok {
+			continue
+		}
+		before, err := c.SnapshotPackageKeys(e.ctx, fromName)
+		if err != nil {
+			return err
+		}
+		var after []string
+		if to == nil {
+			after, err = c.PackageKeys(e.ctx, repo)
+		} else if n, ok := to.Snaps[repo]; ok {
+			after, err = c.SnapshotPackageKeys(e.ctx, n)
+		} else {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		added, removed := diffKeys(before, after)
+		for _, k := range removed {
+			ki := parseKey(k)
+			out = append(out, entry{cell.Dist, cell.Component, "-", ki.Name, ki.Version, ki.Arch})
+		}
+		for _, k := range added {
+			ki := parseKey(k)
+			out = append(out, entry{cell.Dist, cell.Component, "+", ki.Name, ki.Version, ki.Arch})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Dist != b.Dist {
+			return slices.Index(p.Dists, a.Dist) < slices.Index(p.Dists, b.Dist)
+		}
+		if a.Component != b.Component {
+			return a.Component < b.Component
+		}
+		if a.Package != b.Package {
+			return a.Package < b.Package
+		}
+		return a.Version > b.Version
+	})
+	if *asJSON {
+		if out == nil {
+			out = []entry{}
+		}
+		return e.json(out)
+	}
+	fmt.Fprintf(e.stdout, "%s -> %s\n", from.Label, toName)
+	if len(out) == 0 {
+		fmt.Fprintln(e.stdout, "No differences.")
+		return nil
+	}
+	tw := tabwriter.NewWriter(e.stdout, 0, 0, 2, ' ', 0)
+	for _, x := range out {
+		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n", x.Change, x.Dist, x.Component, x.Package, x.Version, x.Arch)
+	}
+	tw.Flush()
+	return nil
 }
